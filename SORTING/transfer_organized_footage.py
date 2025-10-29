@@ -24,7 +24,19 @@ Options:
 Expected structure:
     PROJECT_ROOT/
     ├── Footage_metadata_sorted/  (source folder with .txt placeholders)
+    │   ├── photo/
+    │   │   ├── YYYY-MM-DD/
+    │   │   └── date_non_valide/
+    │   └── video/
+    │       ├── YYYY-MM-DD/
+    │       └── date_non_valide/
     └── Footage/                  (destination folder created automatically)
+        ├── photo/
+        │   ├── YYYY-MM-DD/
+        │   └── date_non_valide/
+        └── video/
+            ├── YYYY-MM-DD/
+            └── date_non_valide/
 
 Security:
 - First copies all files, then deletes originals only if complete success
@@ -39,6 +51,7 @@ import sys
 import shutil
 import logging
 import hashlib
+import json
 from pathlib import Path
 from datetime import datetime
 from typing import List, Tuple, Optional
@@ -70,45 +83,80 @@ def progress_bar(current: int, total: int, description: str = "", width: int = 5
     if current == total:
         print()  # Nouvelle ligne à la fin
 
-def extract_original_path_from_txt(txt_file: Path) -> Optional[Path]:
-    """Extrait le chemin original du fichier vidéo depuis le placeholder .txt"""
+def extract_original_path_from_placeholder(placeholder_file: Path) -> Optional[Path]:
+    """
+    Extrait le chemin original du fichier depuis le placeholder (.txt ou .json)
+    Supporte les deux formats pour rétrocompatibilité
+    """
     try:
-        with open(txt_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("Original path: "):
-                    path_str = line.replace("Original path: ", "")
+        if placeholder_file.suffix == '.json':
+            # Nouveau format JSON
+            with open(placeholder_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                path_str = data.get('placeholder_info', {}).get('original_path')
+                if path_str:
                     return Path(path_str)
+        else:
+            # Ancien format TXT
+            with open(placeholder_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("Original path: "):
+                        path_str = line.replace("Original path: ", "")
+                        return Path(path_str)
         return None
     except Exception as e:
-        logging.error(f"Erreur lecture {txt_file}: {e}")
+        logging.error(f"Erreur lecture {placeholder_file}: {e}")
         return None
 
-def update_txt_file_path(txt_file: Path, new_video_path: Path):
-    """Met à jour le chemin original dans le fichier .txt"""
+def update_placeholder_file_path(placeholder_file: Path, new_video_path: Path):
+    """
+    Met à jour le chemin original dans le fichier placeholder (.txt ou .json)
+    Supporte les deux formats pour rétrocompatibilité
+    """
     try:
-        # Lire le contenu actuel
-        with open(txt_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Remplacer la ligne "Original path: "
-        lines = content.split('\n')
-        for i, line in enumerate(lines):
-            if line.startswith("Original path: "):
-                lines[i] = f"Original path: {new_video_path}"
-                break
-        
-        # Ajouter une note de transfert
-        transfer_note = f"\n=== TRANSFER INFO ===\n"
-        transfer_note += f"Transferred on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        transfer_note += f"New location: {new_video_path}\n"
-        
-        # Écrire le nouveau contenu
-        with open(txt_file, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(lines) + transfer_note)
+        if placeholder_file.suffix == '.json':
+            # Format JSON - mettre à jour la structure
+            with open(placeholder_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Mettre à jour le chemin
+            if 'placeholder_info' not in data:
+                data['placeholder_info'] = {}
+            data['placeholder_info']['original_path'] = str(new_video_path)
+            
+            # Ajouter info de transfert
+            if 'transfer_info' not in data:
+                data['transfer_info'] = {}
+            data['transfer_info']['transferred_at'] = datetime.now().isoformat()
+            data['transfer_info']['new_location'] = str(new_video_path)
+            
+            # Réécrire le JSON
+            with open(placeholder_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        else:
+            # Ancien format TXT
+            with open(placeholder_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Remplacer la ligne "Original path: "
+            lines = content.split('\n')
+            for i, line in enumerate(lines):
+                if line.startswith("Original path: "):
+                    lines[i] = f"Original path: {new_video_path}"
+                    break
+            
+            # Ajouter une note de transfert
+            transfer_note = f"\n=== TRANSFER INFO ===\n"
+            transfer_note += f"Transferred on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            transfer_note += f"New location: {new_video_path}\n"
+            
+            # Écrire le nouveau contenu
+            with open(placeholder_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + transfer_note)
             
     except Exception as e:
-        logging.error(f"Erreur mise à jour {txt_file}: {e}")
+        logging.error(f"Erreur mise à jour {placeholder_file}: {e}")
 
 def verify_file_integrity(source: Path, dest: Path) -> bool:
     """Vérifie l'intégrité d'un fichier copié en comparant les tailles"""
@@ -149,13 +197,17 @@ def copy_with_verification(source: Path, dest: Path) -> bool:
         logging.error(f"Erreur copie {source} -> {dest}: {e}")
         return False
 
-def find_txt_files(organized_dir: Path) -> List[Path]:
-    """Trouve tous les fichiers .txt dans le dossier organisé"""
-    txt_files = []
-    for txt_file in organized_dir.rglob("*.txt"):
-        if txt_file.is_file():
-            txt_files.append(txt_file)
-    return sorted(txt_files)
+def find_placeholder_files(organized_dir: Path) -> List[Path]:
+    """Trouve tous les fichiers placeholders (.txt et .json) dans le dossier organisé"""
+    placeholder_files = []
+    for placeholder_file in organized_dir.rglob("*.json"):
+        if placeholder_file.is_file():
+            placeholder_files.append(placeholder_file)
+    # Support des anciens fichiers .txt aussi
+    for placeholder_file in organized_dir.rglob("*.txt"):
+        if placeholder_file.is_file() and placeholder_file.name != "transfer_log.txt":
+            placeholder_files.append(placeholder_file)
+    return sorted(placeholder_files)
 
 def calculate_total_size(files: List[Tuple[Path, Path]]) -> int:
     """Calcule la taille totale des fichiers à transférer"""
@@ -206,43 +258,43 @@ def main():
     logging.info(f"Mode: {'COPIE' if args.copy else 'DÉPLACEMENT'}")
     logging.info(f"Vérification seulement: {args.verify_only}")
     
-    # Étape 1: Trouver tous les fichiers .txt
-    print("🔍 Recherche des fichiers .txt...")
-    txt_files = find_txt_files(organized_dir)
+    # Étape 1: Trouver tous les fichiers placeholders (.txt et .json)
+    print("🔍 Recherche des fichiers placeholders...")
+    placeholder_files = find_placeholder_files(organized_dir)
     
-    if not txt_files:
-        print("Aucun fichier .txt trouvé dans le dossier organisé.")
+    if not placeholder_files:
+        print("Aucun fichier placeholder trouvé dans le dossier organisé.")
         sys.exit(0)
     
-    print(f"Trouvé {len(txt_files)} fichiers .txt")
+    print(f"Trouvé {len(placeholder_files)} fichiers placeholders")
     
-    # Étape 2: Analyser les fichiers .txt et préparer les transferts
+    # Étape 2: Analyser les fichiers placeholders et préparer les transferts
     print("📋 Analyse des fichiers placeholders...")
-    transfers = []  # Liste de (source_path, dest_path, txt_file)
+    transfers = []  # Liste de (source_path, dest_path, placeholder_file)
     missing_files = []
     
-    for i, txt_file in enumerate(txt_files):
-        progress_bar(i, len(txt_files), f"Analyse: {txt_file.name}")
+    for i, placeholder_file in enumerate(placeholder_files):
+        progress_bar(i, len(placeholder_files), f"Analyse: {placeholder_file.name}")
         
-        original_path = extract_original_path_from_txt(txt_file)
+        original_path = extract_original_path_from_placeholder(placeholder_file)
         if not original_path:
-            logging.warning(f"Impossible d'extraire le chemin original de: {txt_file}")
+            logging.warning(f"Impossible d'extraire le chemin original de: {placeholder_file}")
             continue
         
         if not original_path.exists():
             logging.warning(f"Fichier original manquant: {original_path}")
-            missing_files.append((original_path, txt_file))
+            missing_files.append((original_path, placeholder_file))
             continue
         
         # Calculer le chemin de destination
-        # Maintenir la même structure relative que les .txt
-        relative_path = txt_file.relative_to(organized_dir)
-        # Remplacer l'extension .txt par l'extension originale
+        # Maintenir la même structure relative que les placeholders
+        relative_path = placeholder_file.relative_to(organized_dir)
+        # Remplacer l'extension .txt/.json par l'extension originale
         dest_path = output_dir / relative_path.with_suffix(original_path.suffix)
         
-        transfers.append((original_path, dest_path, txt_file))
+        transfers.append((original_path, dest_path, placeholder_file))
     
-    progress_bar(len(txt_files), len(txt_files), "Analyse terminée")
+    progress_bar(len(placeholder_files), len(placeholder_files), "Analyse terminée")
     
     # Rapport d'analyse
     print(f"\n📊 RAPPORT D'ANALYSE:")
@@ -300,9 +352,9 @@ def main():
         success = copy_with_verification(source_path, dest_path)
         
         if success:
-            successful_transfers.append((source_path, dest_path, txt_file))
-            # Mettre à jour le fichier .txt avec le nouveau chemin
-            update_txt_file_path(txt_file, dest_path)
+            successful_transfers.append((source_path, dest_path, placeholder_file))
+            # Mettre à jour le fichier placeholder avec le nouveau chemin
+            update_placeholder_file_path(placeholder_file, dest_path)
         else:
             failed_transfers.append((source_path, dest_path, txt_file))
     

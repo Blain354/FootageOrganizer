@@ -23,7 +23,19 @@ Options:
 Expected structure:
     PROJECT_ROOT/
     ├── Footage_metadata_sorted/  (folder with .txt placeholders)
+    │   ├── photo/
+    │   │   ├── YYYY-MM-DD/
+    │   │   └── date_non_valide/
+    │   └── video/
+    │       ├── YYYY-MM-DD/
+    │       └── date_non_valide/
     └── Footage/                  (destination folder for metadata.csv)
+        ├── photo/
+        │   ├── YYYY-MM-DD/
+        │   └── date_non_valide/
+        └── video/
+            ├── YYYY-MM-DD/
+            └── date_non_valide/
 
 Output:
     metadata.csv in PROJECT_ROOT/Footage/ with columns:
@@ -43,14 +55,14 @@ import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-# Couleurs valides (ordonnées pour éviter confusion daltonisme rouge-vert)
+# Valid colors (ordered to reduce confusion for colorblind users)
 VALID_COLORS = [
-    "Blue",      # Très distinct pour daltoniens
-    "Green",     # Préféré pour DJI LOG
-    "Purple",    # Très distinct
-    "Cyan",      # Distinct du rouge/vert
-    "Yellow",    # Distinct mais attention avec fond blanc
-    "Orange",    # Peut être confondu avec rouge
+    "Blue",      # Highly distinct
+    "Green",     # Preferred for DJI LOG
+    "Purple",    # Distinct
+    "Cyan",      # Distinct from red/green
+    "Yellow",    # Distinct, but careful with white backgrounds
+    "Orange",    # May be confused with red
     "Pink",      # Distinct
     "Fuchsia",   # Magenta variant
     "Violet",    # Purple variant
@@ -59,40 +71,41 @@ VALID_COLORS = [
     "Rose",      # Pink variant
     "Magenta",   # Similar to fuchsia
     "Brown",     # Neutral
-    "Olive",     # Green variant - attention daltonisme
+    "Olive",     # Green variant
     "Tan",       # Brown variant
     "Sand",      # Neutral
-    "Red",       # À éviter pour daltonisme mais gardé en fin
+    "Red",       # Last resort for color assignment
 ]
 
-# Couleurs par famille de sources (couleurs similaires par source)
+# Color families per source (preferential colors per source)
 SOURCE_COLOR_FAMILIES = {
-    "DRONE": ["Green", "Olive"],           # Types de vert pour DJI
-    "CELL-BLAIN": ["Orange", "Tan"],           # Types d'orange pour Blain
-    "CANON": ["Blue", "Cyan"],                 # Types de bleu pour Canon
+    "DRONE": ["Green", "Olive"],
+    "CELL-BLAIN": ["Orange", "Tan"],
+    "CANON": ["Blue", "Cyan"],
 }
 
-# Couleurs disponibles pour l'attribution dynamique (excluant celles déjà utilisées dans les familles)
+# Dynamic colors pool for assignment (excluding family colors)
 DYNAMIC_COLORS = [
-    "Purple", "Violet",        # Purple family
-    "Pink", "Rose", "Fuchsia", # Pink family  
-    "Yellow", "Sand",          # Yellow family
-    "Brown", "Lavender",       # Neutral colors
-    "Teal", "Magenta",         # Remaining colors
-    "Red"                      # Last resort (daltonisme)
+    "Purple", "Violet",
+    "Pink", "Rose", "Fuchsia",
+    "Yellow", "Sand",
+    "Brown", "Lavender",
+    "Teal", "Magenta",
+    "Red"
 ]
 
 def setup_logging():
-    """Configure le logging minimal"""
+    """Configure simple logging for this script"""
     logging.basicConfig(
         level=logging.INFO,
         format='%(levelname)s: %(message)s'
     )
 
-def parse_txt_metadata(txt_file_path: Path) -> Tuple[str, str, str, str]:
+def parse_placeholder_metadata(placeholder_file_path: Path) -> Tuple[str, str, str, str]:
     """
-    Parse les métadonnées depuis un fichier .txt placeholder
-    
+    Parse metadata from a placeholder file (.txt or .json).
+    Supports both formats for backward compatibility.
+
     Returns:
         (source_tag, hdr_tag, original_filename, new_path)
     """
@@ -102,64 +115,81 @@ def parse_txt_metadata(txt_file_path: Path) -> Tuple[str, str, str, str]:
     new_path = ""
     
     try:
-        with open(txt_file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Extraire le SOURCE TAG
-        source_match = re.search(r'\*\*\* SOURCE TAG: ([^\*]+) \*\*\*', content)
-        if source_match:
-            source_tag = source_match.group(1).strip()
-        
-        # Extraire le HDR TAG
-        hdr_match = re.search(r'\*\*\* HDR TAG: ([^\*]+) \*\*\*', content)
-        if hdr_match:
-            hdr_tag = hdr_match.group(1).strip()
-        
-        # Extraire le nom original du fichier
-        placeholder_match = re.search(r'PLACEHOLDER FOR: (.+)', content)
-        if placeholder_match:
-            original_filename = placeholder_match.group(1).strip()
-        
-        # Extraire le nouveau chemin (si transféré)
-        new_location_match = re.search(r'New location: (.+)', content)
-        if new_location_match:
-            new_path = new_location_match.group(1).strip()
+        if placeholder_file_path.suffix == '.json':
+            # JSON format (new)
+            import json
+            with open(placeholder_file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Extract data from JSON
+            source_tag = data.get('source_detection', {}).get('source_tag', 'UNKNOWN')
+            hdr_tag = data.get('video_metadata', {}).get('hdr_tag', 'SDR')
+            original_filename = data.get('placeholder_info', {}).get('original_filename', '')
+            
+            # Path - prefer transfer_info.new_location if available
+            if 'transfer_info' in data and 'new_location' in data['transfer_info']:
+                new_path = data['transfer_info']['new_location']
+            else:
+                new_path = data.get('placeholder_info', {}).get('original_path', '')
         else:
-            # Si pas de nouvelle location, extraire le chemin original
-            original_path_match = re.search(r'Original path: (.+)', content)
-            if original_path_match:
-                new_path = original_path_match.group(1).strip()
+            # Legacy TXT format
+            with open(placeholder_file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Extract SOURCE TAG
+            source_match = re.search(r'\*\*\* SOURCE TAG: ([^\*]+) \*\*\*', content)
+            if source_match:
+                source_tag = source_match.group(1).strip()
+            
+            # Extract HDR TAG
+            hdr_match = re.search(r'\*\*\* HDR TAG: ([^\*]+) \*\*\*', content)
+            if hdr_match:
+                hdr_tag = hdr_match.group(1).strip()
+            
+            # Extract original filename
+            placeholder_match = re.search(r'PLACEHOLDER FOR: (.+)', content)
+            if placeholder_match:
+                original_filename = placeholder_match.group(1).strip()
+            
+            # Extract new location (if transferred)
+            new_location_match = re.search(r'New location: (.+)', content)
+            if new_location_match:
+                new_path = new_location_match.group(1).strip()
+            else:
+                # If no new location, extract the original path
+                original_path_match = re.search(r'Original path: (.+)', content)
+                if original_path_match:
+                    new_path = original_path_match.group(1).strip()
     
     except Exception as e:
-        logging.warning(f"Erreur lecture métadonnées {txt_file_path}: {e}")
+        logging.warning(f"Failed to read metadata from {placeholder_file_path}: {e}")
     
     return source_tag, hdr_tag, original_filename, new_path
 
 def detect_source_and_encoding(filename: str, relpath: str) -> Tuple[str, str, str]:
     """
-    OBSOLÈTE: Remplacé par parse_txt_metadata pour l'analyse des fichiers .txt
-    Gardé pour compatibilité avec les fichiers .mp4 directs
-    """
-    """
-    Détermine le groupe, color_space et source basé sur le nom de fichier et chemin
-    
+    Deprecated: replaced by parse_txt_metadata for analyzing placeholder files.
+    Kept for compatibility with direct .mp4 scanning.
+
+    Determine group, color_space and source based on filename and path.
+
     Returns:
         (group_name, color_space, source)
     """
     filename_lower = filename.lower()
     relpath_lower = relpath.lower()
     
-    # Détection de la source basée sur le chemin et nom de fichier
+    # Detect source based on path and filename
     source = ""
     base_group = ""
     
-    # Règle 1: DJI Drone (priorité au chemin puis au nom de fichier)
+    # Rule 1: DJI Drone (prefer path over filename)
     if any(indicator in relpath_lower for indicator in ["drone", "dji"]) or \
        any(indicator in filename_lower for indicator in ["dji_", "dji "]):
         source = "DJI_DRONE"
         base_group = "DJI"
     
-    # Règle 2: Cell phones (vérifier dans l'ordre de priorité)
+    # Rule 2: Cell phones (check in priority order)
     elif "cell_blain" in relpath_lower:
         source = "CELL_BLAIN"
         base_group = "CELL_BLAIN"
@@ -170,23 +200,23 @@ def detect_source_and_encoding(filename: str, relpath: str) -> Tuple[str, str, s
         source = "CELL_WALTZ"
         base_group = "CELL_WALTZ"
     elif "cell" in relpath_lower:
-        # Cell générique si pas plus spécifique
+    # Generic cell phone if not more specific
         source = "CELL_PHONE"
         base_group = "CELL"
     
-    # Règle 3: GoPro
+    # Rule 3: GoPro
     elif any(indicator in relpath_lower for indicator in ["gopro", "hero"]) or \
          any(indicator in filename_lower for indicator in ["gopro", "hero", "gp"]):
         source = "GOPRO"
         base_group = "GOPRO"
     
-    # Règle 4: Camera générique
+    # Rule 4: Generic camera
     elif any(indicator in relpath_lower for indicator in ["camera", "cam"]) or \
          any(indicator in filename_lower for indicator in ["dsc", "img", "mov"]):
         source = "CAMERA"
         base_group = "CAMERA"
     
-    # Si aucune source détectée
+    # If no source detected
     if not source:
         return "no_group", "Rec709", ""
     
@@ -209,7 +239,7 @@ def detect_source_and_encoding(filename: str, relpath: str) -> Tuple[str, str, s
 def find_video_files(root_path: Path) -> List[Tuple[str, str, str, str, str]]:
     """
     Trouve tous les fichiers vidéo dans le dossier racine
-    Analyse les .txt de métadonnées ou directement les .mp4
+    Analyse les fichiers placeholders (.txt ou .json) ou directement les .mp4
     
     Returns:
         Liste de tuples (filename, relpath, source_tag, hdr_tag, group_name)
@@ -217,20 +247,23 @@ def find_video_files(root_path: Path) -> List[Tuple[str, str, str, str, str]]:
     video_files = []
     seen_relpaths = set()
     
-    # D'abord chercher les fichiers .txt de métadonnées (exclure ceux dans dossier photos)
+    # D'abord chercher les fichiers placeholders (.json et .txt de métadonnées)
+    all_json_files = list(root_path.rglob("*.json"))
     all_txt_files = list(root_path.rglob("*.txt"))
-    txt_files = [f for f in all_txt_files if "photos" not in f.parts]
     
-    if all_txt_files:
-        excluded_count = len(all_txt_files) - len(txt_files)
-        excluded_files = [f for f in all_txt_files if "photos" in f.parts]
-        logging.info(f"Mode métadonnées: analyse de {len(txt_files)} fichiers .txt (exclus {excluded_count} photos)")
-        if excluded_files:
-            logging.info(f"Photos exclues: {[f.name for f in excluded_files]}")
+    # Exclure ceux dans dossier photos
+    json_files = [f for f in all_json_files if "photos" not in f.parts and "photo" not in f.parts]
+    txt_files = [f for f in all_txt_files if "photos" not in f.parts and "photo" not in f.parts]
     
-    if txt_files:
-        for txt_file in txt_files:
-            source_tag, hdr_tag, original_filename, video_path = parse_txt_metadata(txt_file)
+    placeholder_files = json_files + txt_files
+    
+    if all_json_files or all_txt_files:
+        excluded_count = (len(all_json_files) + len(all_txt_files)) - len(placeholder_files)
+        logging.info(f"Mode métadonnées: analyse de {len(placeholder_files)} fichiers placeholders (JSON+TXT) (exclus {excluded_count} photos)")
+    
+    if placeholder_files:
+        for placeholder_file in placeholder_files:
+            source_tag, hdr_tag, original_filename, video_path = parse_placeholder_metadata(placeholder_file)
             
             if not original_filename:
                 continue
@@ -242,13 +275,13 @@ def find_video_files(root_path: Path) -> List[Tuple[str, str, str, str, str]]:
                     relpath = Path(video_path).relative_to(root_path).as_posix()
                 except ValueError:
                     # Si le fichier vidéo n'est pas sous root_path, essayer de construire le relpath
-                    # en utilisant la structure du .txt mais avec extension .mp4
-                    txt_relpath = txt_file.relative_to(root_path).as_posix()
-                    relpath = txt_relpath.replace('.txt', '.mp4')
+                    # en utilisant la structure du placeholder mais avec extension .mp4
+                    placeholder_relpath = placeholder_file.relative_to(root_path).as_posix()
+                    relpath = placeholder_relpath.replace('.txt', '.mp4').replace('.json', '.mp4')
             else:
-                # Fallback: construire le relpath basé sur le .txt mais avec extension .mp4
-                txt_relpath = txt_file.relative_to(root_path).as_posix()
-                relpath = txt_relpath.replace('.txt', '.mp4')
+                # Fallback: construire le relpath basé sur le placeholder mais avec extension .mp4
+                placeholder_relpath = placeholder_file.relative_to(root_path).as_posix()
+                relpath = placeholder_relpath.replace('.txt', '.mp4').replace('.json', '.mp4')
             
             # Ignorer les doublons
             if relpath in seen_relpaths:
@@ -533,63 +566,101 @@ def create_metadata_csv_from_txt(metadata_sorted_path: Path, project_root: Path,
     Crée le fichier metadata.csv en lisant les fichiers .txt placeholders (vidéos seulement)
     """
     logging.info(f"Scan du dossier de métadonnées: {metadata_sorted_path}")
-    
-    # Trouver tous les fichiers .txt (exclure les photos)
-    all_txt_files = []
-    txt_files = []
-    for txt_file in metadata_sorted_path.rglob("*.txt"):
-        if txt_file.is_file():
-            all_txt_files.append(txt_file)
-            if "photos" not in txt_file.parts:
-                txt_files.append(txt_file)
-    
-    if not txt_files and not all_txt_files:
-        logging.warning("Aucun fichier .txt placeholder trouvé")
+
+    # Trouver tous les fichiers .txt et .json (exclure les photos)
+    all_txt_files = [f for f in metadata_sorted_path.rglob("*.txt") if f.is_file()]
+    txt_files = [f for f in all_txt_files if "photos" not in f.parts and "photo" not in f.parts]
+
+    all_json_files = [f for f in metadata_sorted_path.rglob("*.json") if f.is_file()]
+    json_files = [f for f in all_json_files if "photos" not in f.parts and "photo" not in f.parts]
+
+    if not txt_files and not json_files:
+        logging.warning("Aucun fichier .txt/.json placeholder trouvé")
         return
-        
-    excluded_count = len(all_txt_files) - len(txt_files)
-    logging.info(f"Trouvé {len(txt_files)} fichiers .txt vidéo (exclus {excluded_count} photos)")
-    
-    if not txt_files:
+
+    excluded_count = (len(all_txt_files) + len(all_json_files)) - (len(txt_files) + len(json_files))
+    logging.info(f"Trouvé {len(txt_files)} fichiers .txt vidéo et {len(json_files)} fichiers .json vidéo (exclus {excluded_count} photos)")
+
+    if not txt_files and not json_files:
         logging.info("Aucun fichier vidéo trouvé après exclusion des photos")
         return
-    
-    # Analyser chaque fichier .txt
+
+    # Analyser chaque fichier placeholder (.json puis .txt)
     metadata_rows = []
     groups_found = set()
-    
+
+    # Traiter les JSON (nouveau format)
+    for json_file in json_files:
+        try:
+            source_tag, hdr_tag, original_filename, video_path = parse_placeholder_metadata(json_file)
+            if not original_filename:
+                logging.warning(f"JSON placeholder sans original_filename: {json_file}")
+                continue
+
+            # Construire un dictionnaire similaire au parse_txt_placeholder
+            parsed_data = {
+                'original_filename': original_filename,
+                'original_path': video_path or json_file.as_posix(),
+                'source_tag': source_tag or 'UNKNOWN',
+                'hdr_tag': hdr_tag,
+                'color_space': 'Log' if hdr_tag and ('HDR' in hdr_tag or 'LOG' in hdr_tag) else 'Rec709',
+                'is_log': bool(hdr_tag and ('HDR' in hdr_tag or 'LOG' in hdr_tag)),
+                'txt_relpath': str(json_file.relative_to(metadata_sorted_path)),
+                'expected_video_name': json_file.stem + Path(original_filename).suffix
+            }
+
+        except Exception as e:
+            logging.warning(f"Erreur parsing JSON placeholder {json_file}: {e}")
+            continue
+
+        # Construire le nom de groupe basé sur la source et le type d'encodage
+        base_group = parsed_data['source_tag']
+        if parsed_data['hdr_tag']:
+            hdr_tag = parsed_data['hdr_tag']
+            group_name = f"{base_group}_LOG" if ('HDR' in hdr_tag or 'LOG' in hdr_tag) else f"{base_group}_709"
+        else:
+            group_name = f"{base_group}_LOG" if parsed_data['is_log'] else f"{base_group}_709"
+
+        groups_found.add(group_name)
+
+        # Calculer relpath attendu
+        relative_json_path = json_file.relative_to(metadata_sorted_path)
+        relative_video_path = relative_json_path.with_suffix(Path(parsed_data['original_filename']).suffix)
+
+        metadata_rows.append({
+            'filename': parsed_data['expected_video_name'],
+            'relpath': str(relative_video_path).replace('\\', '/'),
+            'group_name': group_name,
+            'color_space': parsed_data['color_space'],
+            'source': parsed_data['source_tag']
+        })
+
+    # Traiter les TXT (ancien format)
     for txt_file in txt_files:
         parsed_data = parse_txt_placeholder(txt_file)
         if not parsed_data:
             continue
-        
+
         # Utiliser directement le source tag du fichier .txt
         source_tag = parsed_data['source_tag']
-        
+
         # Créer le nom de groupe basé sur la source et le type d'encodage
         base_group = source_tag
-        
+
         # Utiliser le HDR TAG si disponible, sinon fallback sur is_log
         if parsed_data['hdr_tag']:
             hdr_tag = parsed_data['hdr_tag']
-            if 'HDR' in hdr_tag or 'LOG' in hdr_tag:
-                group_name = f"{base_group}_LOG"
-            else:  # SDR
-                group_name = f"{base_group}_709"
+            group_name = f"{base_group}_LOG" if ('HDR' in hdr_tag or 'LOG' in hdr_tag) else f"{base_group}_709"
         else:
-            # Fallback sur is_log
-            if parsed_data['is_log']:
-                group_name = f"{base_group}_LOG"
-            else:
-                group_name = f"{base_group}_709"
-        
+            group_name = f"{base_group}_LOG" if parsed_data['is_log'] else f"{base_group}_709"
+
         groups_found.add(group_name)
-        
+
         # Calculer le chemin relatif dans le dossier Footage final
         # Remplacer .txt par l'extension originale
         relative_txt_path = txt_file.relative_to(metadata_sorted_path)
         relative_video_path = relative_txt_path.with_suffix(Path(parsed_data['original_filename']).suffix)
-        
+
         metadata_rows.append({
             'filename': parsed_data['expected_video_name'],
             'relpath': str(relative_video_path).replace('\\', '/'),  # Normalize path separators

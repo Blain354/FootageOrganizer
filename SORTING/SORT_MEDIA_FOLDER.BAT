@@ -34,7 +34,7 @@ REM ========================================================================
 
 setlocal enabledelayedexpansion
 set TARGET_PATH=%1
-set TIMEZONE=America/Montreal
+set TIMEZONE=America/Guatemala
 
 REM Define supported video extensions for Gyroflow stabilization
 set VIDEO_EXTENSIONS=.mp4 .mov .m4v .avi .mkv .mts .m2ts .wmv .3gp .mpg .mpeg .insv .360
@@ -177,11 +177,21 @@ if exist "%TARGET_PATH%\Footage_metadata_sorted" (
 echo.
 
 echo [1/4] Organizing files by date (including photos)...
-python organize_footage_links.py "%TARGET_PATH%" --include-photos
+python organize_footage_links.py "%TARGET_PATH%" --include-photos --tz "%TIMEZONE%"
 if errorlevel 1 (
     echo Error during file organization
     exit /b %errorlevel%
 )
+echo [1.5/4] Verify generated structure before continuing...
+echo.
+set /p _CONTINUE="Press Enter to continue or type N then Enter to abort: "
+if /i "%_CONTINUE%"=="N" (
+    echo Aborting by user request. No transfer will be performed.
+    pause
+    exit /b 0
+)
+echo Continuing with transfer...
+echo.
 
 echo [2/4] Transferring video files...
 python transfer_organized_footage.py "%TARGET_PATH%" --copy

@@ -22,6 +22,7 @@ A complete automated workflow to organize video footage from multiple sources (p
 ## 🎬 Key Features
 
 - **📅 Smart Date Organization:** Automatically sorts footage chronologically, even from different time zones
+- **⏰ Time Adjustment per Group:** Correct camera clock errors automatically (NEW!)
 - **🎨 Automatic Color Tagging:** Intelligently groups clips by camera type and color profile for efficient grading
 - **🚁 Gyroflow Integration:** Optional stabilization for drone and action camera footage
 - **📱 Multi-Source Support:** Handles phones, cameras, drones with different metadata formats
@@ -144,15 +145,30 @@ After processing, you'll have:
 my_project/
 ├── Footage_raw/                    # Original files (unchanged)
 ├── Footage_metadata_sorted/        # Intermediate placeholders
+│   ├── photo/                      # All photos organized by date
+│   │   ├── 2024-03-15/
+│   │   │   └── 16h45m30s_phone_IMG_1234.txt
+│   │   └── 2024-03-16/
+│   └── video/                      # All videos organized by date
+│       ├── 2024-03-15/
+│       │   ├── 14h23m45s_drone_DJI_0001.txt
+│       │   └── 15h30m12s_phone_VIDEO001.txt
+│       └── 2024-03-16/
 └── Footage/                        # Final organized files
-    ├── 2024-03-15/
-    │   ├── 14-23-45_drone_DJI_0001.mp4
-    │   ├── 15-30-12_phone_VIDEO001.mp4
-    │   └── photos/
-    │       └── 16-45-30_phone_IMG_1234.jpg
-    ├── 2024-03-16/
+    ├── photo/                      # All photos with actual files
+    │   ├── 2024-03-15/
+    │   │   └── 16h45m30s_phone_IMG_1234.jpg
+    │   └── 2024-03-16/
+    ├── video/                      # All videos with actual files
+    │   ├── 2024-03-15/
+    │   │   ├── 14h23m45s_drone_DJI_0001.mp4
+    │   │   └── 15h30m12s_phone_VIDEO001.mp4
+    │   └── 2024-03-16/
     └── metadata.csv                # For DaVinci Resolve tagging
 ```
+
+**🆕 NEW: Separate photo and video folders**  
+Photos and videos are now organized in separate root folders (`photo/` and `video/`) to make navigation and management easier. Within each folder, the same date-based organization (YYYY-MM-DD) is maintained.
 ## 🎨 DaVinci Resolve Integration
 
 ### Installing the Tagging Script
@@ -294,6 +310,32 @@ python organize_footage_links.py "my_project" --tz "Europe/Paris"
 
 Common timezones: `America/Montreal`, `Europe/Paris`, `Asia/Tokyo`, `America/Los_Angeles`
 
+### ⏰ Time Adjustment per Group (NEW!)
+
+Sometimes cameras have incorrect time settings. You can automatically adjust timestamps for specific groups:
+
+**Create `specific_group_time_adjust.json` in your project root:**
+```json
+{
+    "canon": "+00000001_000000",
+    "gopro": "-00000000_020000"
+}
+```
+
+**Format:** `[+/-]YYYYMMDD_HHMMSS`
+- `+00000001_000000` = Add 1 day
+- `-00000000_020000` = Subtract 2 hours
+- `+00000007_000000` = Add 7 days (1 week)
+
+**Features:**
+✅ **Smart Rollover:** 23:00 + 2 hours = next day at 01:00  
+✅ **Per-Group:** Different adjustment for each camera/source  
+✅ **Non-Destructive:** Original files never modified  
+✅ **Case-Insensitive:** "Canon", "canon", "CANON" all work  
+✅ **Drone Photos:** Applies to both videos AND photos (uses mtime for photos)
+
+**See:** [`documentation/GUIDE_AJUSTEMENT_TEMPS.md`](documentation/GUIDE_AJUSTEMENT_TEMPS.md) for complete guide and examples.
+
 ## ❓ Troubleshooting
 
 ### Common Issues
@@ -321,6 +363,33 @@ Common timezones: `America/Montreal`, `Europe/Paris`, `Asia/Tokyo`, `America/Los
 2. **Try simulation mode:** Use `--simulate` flag to test without making changes
 3. **Verify project structure:** Ensure `Footage_raw/` folder exists with correct name
 4. **Test with small batch:** Try with a few files first to identify issues
+5. **🆕 Analyze file metadata:** Use `SHOW_FILE_METADATA.BAT` or `python debug/show_file_metadata.py` to see all metadata for a specific file
+
+### 🔍 Debugging Tool: Show File Metadata
+
+**NEW!** Use the metadata viewer to debug any file organization issues:
+
+```bash
+# View all metadata for a file
+python debug\show_file_metadata.py "path\to\video.mp4"
+
+# Or drag-and-drop a file onto SHOW_FILE_METADATA.BAT
+
+# Save metadata to file
+python debug\show_file_metadata.py "video.mp4" --save
+
+# JSON output for automation
+python debug\show_file_metadata.py "video.mp4" --json
+```
+
+This tool shows:
+- ✅ File information (size, dates)
+- ✅ All timestamps (FFprobe, ExifTool, filename extraction)
+- ✅ Video metadata (codec, resolution, colorspace, HDR/LOG detection)
+- ✅ Source detection and categorization
+- ✅ Raw FFprobe and ExifTool data
+
+Perfect for understanding why a file isn't being organized correctly!
 
 ## ✨ Key Benefits
 
@@ -374,6 +443,23 @@ The system performs comprehensive analysis:
 | Script | Purpose |
 |--------|---------|
 | `debug/metadata_inspector.py` | Debug metadata extraction issues |
+| `debug/show_file_metadata.py` | **NEW!** Display complete metadata for any file |
+| `SHOW_FILE_METADATA.BAT` | **NEW!** Windows wrapper for easy drag-and-drop metadata viewing |
+
+---
+
+## 📚 Documentation
+
+Complete documentation is available in the [`documentation/`](documentation/) folder:
+
+- **[INDEX.md](documentation/INDEX.md)** - Documentation index and navigation guide
+- **[GUIDE_AJUSTEMENT_TEMPS.md](documentation/GUIDE_AJUSTEMENT_TEMPS.md)** - Time adjustment feature guide
+- **[GUIDE_METADATA_VIEWER.md](documentation/GUIDE_METADATA_VIEWER.md)** - Metadata viewer tool guide
+- **[CHANGELOG_STRUCTURE.md](documentation/CHANGELOG_STRUCTURE.md)** - Project structure changes
+- **[CHANGEMENT_FORMAT_JSON.md](documentation/CHANGEMENT_FORMAT_JSON.md)** - JSON format migration
+- **[AMELIORATION_LOGGING.md](documentation/AMELIORATION_LOGGING.md)** - Colored logging system
+
+See the [documentation index](documentation/INDEX.md) for a complete list of available documentation.
 
 ---
 

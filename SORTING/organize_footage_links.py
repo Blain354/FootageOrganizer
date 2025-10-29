@@ -7,7 +7,8 @@ Organizes video files by date creating secure .txt placeholders.
 
 Functions:
 - Recursively scans source folder for video files
-- Organizes files in dated folders (YYYY-MM-DD)
+- Organizes files in a type-based structure with dated folders
+- Structure: photo/YYYY-MM-DD/ and video/YYYY-MM-DD/
 - Creates .txt placeholder files containing metadata instead of moving files
 - Names placeholders: {SOURCE}_{FILENAME}.txt where SOURCE is parent folder
 
@@ -34,6 +35,10 @@ Security:
 - No original files are modified or moved
 - Lightweight .txt placeholders for rapid prototyping
 - Vérifications d'intégrité et logging complet
+Security:
+- No original files are modified or moved
+- Lightweight .txt placeholders for rapid prototyping
+- Integrity checks and comprehensive logging
 """
 from typing import Union, Optional
 import argparse
@@ -47,6 +52,231 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 import zoneinfo
+from typing import Tuple
+
+# ============================================================================
+# CONFIGURATION CONSTANTS
+# ============================================================================
+
+# Drone folder names that require special UTC timestamp conversion
+# Only folders with these exact names (case-insensitive) will use QuickTime metadata
+DRONE_FOLDERS = [
+    "drone",
+    "dji", 
+    "mini4",
+    "mavic"
+]
+
+# Photo file extensions (case-insensitive)
+PHOTO_EXTENSIONS = [
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", 
+    ".raw", ".cr2", ".nef", ".arw", ".dng",
+    ".heic", ".heif", ".webp", ".tiff", ".tif"
+]
+
+# ============================================================================
+# ANSI COLORS FOR LOGGING
+# ============================================================================
+
+# ANSI color codes for console output
+class LogColors:
+    """ANSI color codes for colored console output"""
+    BLUE = '\033[94m'      # Light blue for INFO
+    CYAN = '\033[96m'      # Cyan for DEBUG
+    YELLOW = '\033[93m'    # Yellow for WARNING
+    RED = '\033[91m'       # Red for ERROR
+    BOLD_RED = '\033[1;91m'  # Bold red for CRITICAL
+    RESET = '\033[0m'      # Reset to default
+    BOLD = '\033[1m'       # Bold text
+    
+    @staticmethod
+    def is_terminal_supports_color():
+        """Check if terminal supports ANSI colors"""
+        # Windows 10+ supports ANSI in newer terminals
+        if os.name == 'nt':
+            # Enable ANSI support on Windows
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+            return True
+        return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter with colors and better spacing"""
+    
+    LEVEL_COLORS = {
+        logging.DEBUG: LogColors.CYAN,
+        logging.INFO: LogColors.BLUE,
+        logging.WARNING: LogColors.YELLOW,
+        logging.ERROR: LogColors.RED,
+        logging.CRITICAL: LogColors.BOLD_RED,
+    }
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_colors = LogColors.is_terminal_supports_color()
+        self._needs_newline = False  # Track if we need to clear progress line
+    
+    def format(self, record):
+        # Add newline only if there was a progress line before
+        # This prevents multiple blank lines between consecutive log messages
+        prefix = '\n' if self._needs_newline else ''
+        self._needs_newline = False  # Reset after use
+        
+        if self.use_colors:
+            # Colorize level name
+            level_color = self.LEVEL_COLORS.get(record.levelno, '')
+            colored_levelname = f"{level_color}{record.levelname}{LogColors.RESET}"
+            record.levelname = colored_levelname
+        
+        formatted = super().format(record)
+        return prefix + formatted
+
+def setup_logging(level=logging.INFO):
+    """Configure logging with colors and better formatting"""
+    # Remove any existing handlers
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Create console handler with colored formatter
+    console_handler = logging.StreamHandler(sys.stdout)
+    formatter = ColoredFormatter('%(levelname)s: %(message)s')
+    console_handler.setFormatter(formatter)
+    
+    # Configure root logger
+    root_logger.setLevel(level)
+    root_logger.addHandler(console_handler)
+    
+    # Store formatter reference for progress line tracking
+    root_logger._custom_formatter = formatter
+
+# Global reference to logger's formatter for progress line tracking
+def mark_progress_line_shown():
+    """Mark that a progress line was shown, so next log will add newline"""
+    root_logger = logging.getLogger()
+    if hasattr(root_logger, '_custom_formatter'):
+        root_logger._custom_formatter._needs_newline = True
+
+# ========== TIME ADJUSTMENT FUNCTIONS ==========
+
+def parse_time_delta(delta_str: str) -> Tuple[int, int]:
+    """
+    Parse a time delta string in format [+/-]YYYYMMDD_HHMMSS
+    
+    Args:
+        delta_str: String like "+00010000_000000" (add 1 day) or "-00000000_020000" (subtract 2 hours)
+    
+    Returns:
+        Tuple of (total_days, total_seconds)
+    
+    Examples:
+        "+00010000_000000" -> (1, 0)  # Add 1 day
+        "-00000000_020000" -> (0, -7200)  # Subtract 2 hours
+        "+00000001_000000" -> (0, 2592000)  # Add 1 month (30 days approximation)
+    """
+    if not delta_str or len(delta_str) != 16:
+        raise ValueError(f"Invalid delta format: {delta_str}. Expected format: [+/-]YYYYMMDD_HHMMSS")
+    
+    sign = 1 if delta_str[0] == '+' else -1
+    
+    # Parse date components
+    year = int(delta_str[1:5])
+    month = int(delta_str[5:7])
+    day = int(delta_str[7:9])
+    
+    # Parse time components
+    hour = int(delta_str[10:12])
+    minute = int(delta_str[12:14])
+    second = int(delta_str[14:16])
+    
+    # Convert everything to days and seconds
+    # Note: We approximate months as 30 days and years as 365 days for simplicity
+    total_days = sign * (year * 365 + month * 30 + day)
+    total_seconds = sign * (hour * 3600 + minute * 60 + second)
+    
+    return total_days, total_seconds
+
+def apply_time_delta(dt: datetime, delta_str: str) -> datetime:
+    """
+    Apply a time delta to a datetime object
+    
+    Args:
+        dt: Original datetime
+        delta_str: Delta string in format [+/-]YYYYMMDD_HHMMSS
+    
+    Returns:
+        New datetime with delta applied
+    
+    Examples:
+        dt = datetime(2024, 10, 15, 23, 0, 0)
+        apply_time_delta(dt, "+00000000_020000")  # Add 2 hours -> 2024-10-16 01:00:00
+    """
+    from datetime import timedelta
+    
+    days, seconds = parse_time_delta(delta_str)
+    delta = timedelta(days=days, seconds=seconds)
+    
+    return dt + delta
+
+def load_group_time_adjustments(config_path: Path = None) -> dict:
+    """
+    Load time adjustments from JSON config file
+    
+    Args:
+        config_path: Path to config file (default: specific_group_time_adjust.json in script dir)
+    
+    Returns:
+        Dictionary mapping group names (lowercase) to delta strings
+    """
+    if config_path is None:
+        # Default to file in same directory as script
+        script_dir = Path(__file__).parent.parent
+        config_path = script_dir / "specific_group_time_adjust.json"
+    
+    if not config_path.exists():
+        logging.debug(f"No time adjustment config found at {config_path}")
+        return {}
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            adjustments = json.load(f)
+        
+        # Convert keys to lowercase for case-insensitive matching
+        adjustments_lower = {k.lower(): v for k, v in adjustments.items()}
+        
+        logging.info(f"⏰ Loaded time adjustments for {len(adjustments_lower)} group(s) from {config_path.name}")
+        return adjustments_lower
+    
+    except Exception as e:
+        logging.warning(f"⚠️  Failed to load time adjustment config: {e}")
+        return {}
+
+def adjust_datetime_for_group(dt: datetime, group_name: str, adjustments: dict) -> datetime:
+    """
+    Apply time adjustment to datetime if group has a configured delta
+    
+    Args:
+        dt: Original datetime
+        group_name: Name of the group (source tag)
+        adjustments: Dictionary of adjustments loaded from config
+    
+    Returns:
+        Adjusted datetime (or original if no adjustment for this group)
+    """
+    group_lower = group_name.lower()
+    
+    if group_lower in adjustments:
+        delta_str = adjustments[group_lower]
+        adjusted_dt = apply_time_delta(dt, delta_str)
+        logging.info(f"⏰ Applied time adjustment to group '{group_name}': {delta_str}")
+        logging.debug(f"   Original: {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        logging.debug(f"   Adjusted: {adjusted_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        return adjusted_dt
+    
+    return dt
+
+# ========== END TIME ADJUSTMENT FUNCTIONS ==========
 
 VIDEO_EXT_DEFAULT = ".mp4,.mov,.m4v,.avi,.mkv,.mts,.m2ts,.wmv,.3gp,.mpg,.mpeg,.insv,.360,.mod,.tod"
 PHOTO_EXT_DEFAULT = ".jpg,.jpeg,.png,.tiff,.tif,.raw,.cr2,.cr3,.nef,.arw,.dng,.heic,.heif"
@@ -54,9 +284,80 @@ PHOTO_EXT_DEFAULT = ".jpg,.jpeg,.png,.tiff,.tif,.raw,.cr2,.cr3,.nef,.arw,.dng,.h
 def is_windows():
     return os.name == "nt"
 
+# ============================================================================
+# GROUP AND FILE TYPE DETECTION (Simplified)
+# ============================================================================
+
+def get_group_from_path(file_path: Path, footage_raw_root: Path) -> str:
+    """
+    Get group name from immediate parent folder under footage_raw.
+    
+    Args:
+        file_path: Path to the file
+        footage_raw_root: Root footage_raw folder
+        
+    Returns:
+        Group name (parent folder name), or "root" if directly under footage_raw
+        
+    Example:
+        footage_raw/avata/video.mp4 → "avata"
+        footage_raw/canon/IMG_001.jpg → "canon"
+        footage_raw/video.mp4 → "root"
+    """
+    try:
+        rel_path = file_path.relative_to(footage_raw_root)
+        # First part of relative path is the group folder
+        if rel_path.parent == Path("."):
+            return "root"
+        return rel_path.parts[0].lower()
+    except ValueError:
+        # File not under footage_raw
+        return file_path.parent.name.lower() or "root"
+
+def is_drone_group(group_name: str) -> bool:
+    """
+    Check if group is a drone that requires UTC conversion.
+    
+    Args:
+        group_name: Group name from folder
+        
+    Returns:
+        True if group is in DRONE_FOLDERS list
+    """
+    return group_name.lower() in DRONE_FOLDERS
+
+def is_photo(file_path: Path) -> bool:
+    """
+    Check if file is a photo based on extension.
+    
+    Args:
+        file_path: Path to file
+        
+    Returns:
+        True if extension matches photo extensions
+    """
+    return file_path.suffix.lower() in PHOTO_EXTENSIONS
+
+# ============================================================================
+# LEGACY COMPATIBILITY (temporary wrappers)
+# ============================================================================
+
+def _is_photo(p: Path) -> bool:
+    """Legacy wrapper for is_photo()"""
+    return is_photo(p)
+
 def _path_has_drone_segment(p: Path) -> bool:
-    """Vérifie si le chemin contient un dossier commençant par 'drone' ou 'dji'"""
-    return any(part.lower().startswith(("drone", "dji", "avata", "mini4")) for part in p.parts)
+    """
+    Legacy function - checks if ANY parent folder matches drone names.
+    
+    NOTE: This is the OLD logic. Should be replaced with:
+        is_drone_group(get_group_from_path(p, footage_raw_root))
+    """
+    return any(part.lower() in DRONE_FOLDERS for part in p.parts)
+
+# ============================================================================
+# DATE/TIME EXTRACTION FUNCTIONS
+# ============================================================================
 
 def _ffprobe_creation_time(path: Path) -> tuple[Optional[str], Optional[str]]:
     """
@@ -387,6 +688,38 @@ def extract_video_metadata(path: Path) -> dict:
         logging.debug(f"ffprobe metadata extraction failed for {path}: {e}")
         return {}
 
+def get_raw_ffprobe_metadata(path: Path) -> dict:
+    """
+    Obtient toutes les données brutes de ffprobe en format JSON
+    Pour inclusion dans les placeholders JSON
+    """
+    try:
+        cmd = ["ffprobe", "-v", "error", "-print_format", "json", 
+               "-show_format", "-show_streams", str(path)]
+        out = subprocess.check_output(cmd, text=True, timeout=30)
+        return json.loads(out)
+    except Exception as e:
+        logging.debug(f"Raw ffprobe extraction failed for {path}: {e}")
+        return {"error": str(e)}
+
+def get_raw_exiftool_metadata(path: Path) -> dict:
+    """
+    Obtient toutes les données brutes d'exiftool en format JSON
+    Pour inclusion dans les placeholders JSON
+    """
+    try:
+        cmd = ["exiftool", "-j", "-G", "-a", str(path)]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            data = json.loads(result.stdout)
+            return data[0] if data and len(data) > 0 else {}
+        return {"error": result.stderr if result.stderr else "No output from exiftool"}
+    except FileNotFoundError:
+        return {"error": "exiftool not installed"}
+    except Exception as e:
+        logging.debug(f"Raw exiftool extraction failed for {path}: {e}")
+        return {"error": str(e)}
+
 def extract_times_for_drone_file(path: Path, tz_name: str = "America/Montreal"):
     if not _path_has_drone_segment(path):
         logging.info(f"Skipping (not under 'drone'): {path}")
@@ -434,7 +767,9 @@ def extract_times_for_drone_file(path: Path, tz_name: str = "America/Montreal"):
         else:
             # Times are different - metadata is probably real UTC, need conversion
             tz = zoneinfo.ZoneInfo(tz_name)
-            dt_metadata_utc = datetime.fromisoformat(iso_norm).astimezone(timezone.utc)
+            # Parse as UTC explicitly (iso_norm has +00:00 or Z)
+            dt_metadata_utc = datetime.fromisoformat(iso_norm).replace(tzinfo=timezone.utc)
+            # Convert to target timezone
             dt_metadata_local = dt_metadata_utc.astimezone(tz)
             
             logging.info(f"Raw metadata time ({dt_metadata_raw.strftime('%Y-%m-%d %H:%M:%S')}) differs from mtime ({mtime_dt.strftime('%Y-%m-%d %H:%M:%S')}) by {time_diff/60:.1f} minutes, using converted UTC")
@@ -447,7 +782,7 @@ def extract_times_for_drone_file(path: Path, tz_name: str = "America/Montreal"):
             # If we used mtime, create a fake UTC for consistency
             utc_iso = mtime_dt.isoformat() + "Z"
         else:
-            dt_metadata_utc = datetime.fromisoformat(iso_norm).astimezone(timezone.utc)
+            # dt_metadata_utc already created above with proper UTC timezone
             utc_iso = dt_metadata_utc.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
         
         local_iso = dt_final.isoformat()
@@ -555,7 +890,7 @@ def list_media_files(root: Path, video_extensions="", photo_extensions="", video
             yield path, file_type
             if "original" in versions:
                 skipped_count += 1
-                logging.info(f"Skipped original file (stabilized version exists): {versions['original'][0].name}")
+                logging.debug(f"⏭️  Skipped original (stabilized exists): {versions['original'][0].name}")
         elif "original" in versions:
             # Only original version exists - use it
             path, file_type = versions["original"]
@@ -563,15 +898,25 @@ def list_media_files(root: Path, video_extensions="", photo_extensions="", video
     
     if skipped_count > 0:
         print(f"📋 Filtered out {skipped_count} original files (stabilized versions exist)")
-        logging.info(f"Total original files skipped due to stabilized versions: {skipped_count}")
+        logging.info(f"✅ Total original files skipped: {skipped_count} (using stabilized versions)")
 
 def list_videos(root: Path, extensions):
     """Legacy function for backward compatibility - only videos"""
     for file_path, file_type in list_media_files(root, extensions, "", videos_only=True):
         yield file_path
 
-def extract_time_from_file(file_path: Path, tz_name: str = "America/Montreal"):
-    """Extract time from filename first, then fallback to drone metadata, then file metadata"""
+def extract_time_from_file(file_path: Path, tz_name: str = "America/Montreal", group_name: str = None, time_adjustments: dict = None):
+    """Extract time from filename first, then fallback to drone metadata, then file metadata
+    
+    Args:
+        file_path: Path to the file
+        tz_name: Timezone name for drone files
+        group_name: Source group name for time adjustments
+        time_adjustments: Dictionary of time adjustments per group
+    
+    Returns:
+        Time string in format "HHhMMmSSs" or special markers
+    """
     filename = file_path.name
     import re
     
@@ -581,42 +926,64 @@ def extract_time_from_file(file_path: Path, tz_name: str = "America/Montreal"):
         original_path = file_path.parent / (file_path.stem[:-11] + file_path.suffix)  # Remove "_stabilized"
         if original_path.exists():
             logging.info(f"Using original file time for stabilized file: {original_path.name} -> {file_path.name}")
-            return extract_time_from_file(original_path, tz_name)
+            return extract_time_from_file(original_path, tz_name, group_name, time_adjustments)
         else:
             logging.warning(f"Stabilized file found but original missing: {file_path}")
             # Continue with normal processing for stabilized file
+    
+    # Helper function to apply time adjustment to datetime
+    def apply_adjustment(dt: datetime) -> datetime:
+        """Apply time adjustment if configured"""
+        if time_adjustments and group_name:
+            return adjust_datetime_for_group(dt, group_name, time_adjustments)
+        return dt
     
     # For drone files, try QuickTime metadata extraction FIRST (priority over filename)
     if _path_has_drone_segment(file_path):
         drone_data = extract_times_for_drone_file(file_path, tz_name)
         if drone_data:
-            # Extract hour, minute, second from local_time (format: HH-MM-SS)
-            time_parts = drone_data["local_time"].split("-")
-            if len(time_parts) == 3:
-                h, m, s = time_parts
-                return f"{h}h{m}m{s}s"
+            # Parse the local datetime and apply adjustment
+            local_date_str = drone_data["local_date"]
+            local_time_str = drone_data["local_time"]
+            try:
+                dt_str = f"{local_date_str} {local_time_str.replace('-', ':')}"
+                dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                # Apply adjustment
+                dt_adjusted = apply_adjustment(dt)
+                return f"{dt_adjusted.hour:02d}h{dt_adjusted.minute:02d}m{dt_adjusted.second:02d}s"
+            except ValueError:
+                pass
     
     # For non-drone files, try to extract time from filename first
     # Format: 20250821_051728 or 20250821051728 (last 6 digits are HHMMSS)
     
     # Pattern 1: YYYYMMDD_HHMMSS
-    pattern1 = re.search(r'\d{8}_(\d{6})', filename)
+    pattern1 = re.search(r'(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})', filename)
     if pattern1:
-        time_str = pattern1.group(1)
-        h, m, s = time_str[:2], time_str[2:4], time_str[4:6]
-        # Validate time values
-        if 0 <= int(h) <= 23 and 0 <= int(m) <= 59 and 0 <= int(s) <= 59:
-            return f"{h}h{m}m{s}s"
+        year, month, day, h, m, s = pattern1.groups()
+        # Validate values
+        try:
+            dt = datetime(int(year), int(month), int(day), int(h), int(m), int(s))
+            if 1990 <= dt.year <= 2030 and 0 <= dt.hour <= 23:
+                # Apply adjustment
+                dt_adjusted = apply_adjustment(dt)
+                return f"{dt_adjusted.hour:02d}h{dt_adjusted.minute:02d}m{dt_adjusted.second:02d}s"
+        except ValueError:
+            pass
     
-    # Pattern 2: YYYYMMDDHHMMSS (14 digits total, last 6 are time)
-    pattern2 = re.search(r'(\d{14})', filename)
+    # Pattern 2: YYYYMMDDHHMMSS (14 digits total)
+    pattern2 = re.search(r'(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})', filename)
     if pattern2:
-        full_str = pattern2.group(1)
-        time_str = full_str[8:]  # Last 6 digits
-        h, m, s = time_str[:2], time_str[2:4], time_str[4:6]
-        # Validate time values
-        if 0 <= int(h) <= 23 and 0 <= int(m) <= 59 and 0 <= int(s) <= 59:
-            return f"{h}h{m}m{s}s"
+        year, month, day, h, m, s = pattern2.groups()
+        # Validate values
+        try:
+            dt = datetime(int(year), int(month), int(day), int(h), int(m), int(s))
+            if 1990 <= dt.year <= 2030 and 0 <= dt.hour <= 23:
+                # Apply adjustment
+                dt_adjusted = apply_adjustment(dt)
+                return f"{dt_adjusted.hour:02d}h{dt_adjusted.minute:02d}m{dt_adjusted.second:02d}s"
+        except ValueError:
+            pass
     
     # For non-drone files without filename time, try exiftool (iPhone/Apple) - UNIFIED VERSION
     has_filename_date = _has_filename_datetime(file_path)
@@ -626,14 +993,16 @@ def extract_time_from_file(file_path: Path, tz_name: str = "America/Montreal"):
         if datetime_str:
             try:
                 dt = datetime.fromisoformat(datetime_str + "+00:00").replace(tzinfo=None)
-                logging.info(f"Using exiftool time for {file_path.name}: {dt.strftime('%H:%M:%S')} from unified exiftool")
-                return f"{dt.hour:02d}h{dt.minute:02d}m{dt.second:02d}s"
+                # Apply adjustment
+                dt_adjusted = apply_adjustment(dt)
+                logging.debug(f"📅 Extracted time from exiftool for {file_path.name}: {dt_adjusted.strftime('%H:%M:%S')}")
+                return f"{dt_adjusted.hour:02d}h{dt_adjusted.minute:02d}m{dt_adjusted.second:02d}s"
             except ValueError as e:
                 logging.warning(f"Failed to parse exiftool time {datetime_str}: {e}")
                 # Will return "KEEP_ORIGINAL" to trigger special handling
         
-        # If exiftool failed, mark for special handling (keep original name)
-        logging.warning(f"All metadata extraction failed for {file_path.name}, will keep original name in date_non_valide")
+        # If exiftool failed, mark for fallback to mtime (will be handled in main loop)
+        logging.debug(f"No metadata found for {file_path.name} - will use mtime as fallback")
         return "KEEP_ORIGINAL"
     
     # Fallback to file metadata
@@ -642,7 +1011,9 @@ def extract_time_from_file(file_path: Path, tz_name: str = "America/Montreal"):
         dt = datetime.fromtimestamp(ts)
         # Check if metadata date is reasonable
         if 1990 <= dt.year <= 2300:
-            return f"{dt.hour:02d}h{dt.minute:02d}m{dt.second:02d}s"
+            # Apply adjustment
+            dt_adjusted = apply_adjustment(dt)
+            return f"{dt_adjusted.hour:02d}h{dt_adjusted.minute:02d}m{dt_adjusted.second:02d}s"
     except Exception:
         pass
     
@@ -702,28 +1073,71 @@ def remove_temporal_elements(filename: str, file_type: str = "video"):
     
     return clean_filename
 
-def file_date(p: Path, tz_name: str = "America/Montreal"):
+def file_date(p: Path, tz_name: str = "America/Montreal", group_name: str = None, time_adjustments: dict = None):
+    """
+    Extract date from file with optional time adjustment per group
+    
+    Args:
+        p: Path to file
+        tz_name: Timezone name for conversion
+        group_name: Source group name (for time adjustments)
+        time_adjustments: Dictionary of time adjustments per group
+    
+    Returns:
+        datetime.date object or None if invalid
+        
+    Note: Time adjustments are applied to dates extracted from metadata.
+    For files without time information, adjustments use midnight as the time.
+    """
     # Check if this is a stabilized file and try to use original file's date
     if p.stem.endswith("_stabilized"):
         # For stabilized files, try to find the original file and use its date
         original_path = p.parent / (p.stem[:-11] + p.suffix)  # Remove "_stabilized"
         if original_path.exists():
-            logging.info(f"Using original file date for stabilized file: {original_path.name} -> {p.name}")
-            return file_date(original_path, tz_name)
+            logging.debug(f"🔄 Using original file date for stabilized: {original_path.name}")
+            return file_date(original_path, tz_name, group_name, time_adjustments)
         else:
-            logging.warning(f"Stabilized file found but original missing: {p}")
+            logging.warning(f"⚠️  Stabilized file found but original missing: {p}")
             # Continue with normal processing for stabilized file
     
-    # For drone files, try QuickTime metadata first (more reliable than filename)
+    # Helper function to apply adjustments before returning
+    def apply_adjustment_and_return(dt_obj):
+        """Apply time adjustment if configured and return date"""
+        if time_adjustments and group_name:
+            adjusted_dt = adjust_datetime_for_group(dt_obj, group_name, time_adjustments)
+            return adjusted_dt.date()
+        return dt_obj.date() if isinstance(dt_obj, datetime) else dt_obj
+    
+    # For drone files, handle differently for videos vs photos
     if _path_has_drone_segment(p):
-        drone_data = extract_times_for_drone_file(p, tz_name)
-        if drone_data:
-            # Use the local date from QuickTime metadata
-            local_date_str = drone_data["local_date"]
-            try:
-                return datetime.strptime(local_date_str, "%Y-%m-%d").date()
-            except ValueError:
-                pass
+        # For drone VIDEOS: try QuickTime metadata first (more reliable than filename)
+        if not _is_photo(p):
+            drone_data = extract_times_for_drone_file(p, tz_name)
+            if drone_data:
+                # Use the local datetime from QuickTime metadata
+                local_date_str = drone_data["local_date"]
+                local_time_str = drone_data["local_time"]
+                try:
+                    # Combine date and time to get full datetime
+                    dt_str = f"{local_date_str} {local_time_str.replace('-', ':')}"
+                    dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                    return apply_adjustment_and_return(dt)
+                except ValueError:
+                    pass
+        # For drone PHOTOS: use mtime with adjustment
+        else:
+            ts = p.stat().st_mtime
+            # mtime is in local system time, but we want to interpret it in the specified timezone
+            # First, get the datetime as if it's in the target timezone
+            dt_naive = datetime.fromtimestamp(ts)
+            
+            # If tz_name is different from system timezone, we need to adjust
+            # However, mtime is already in system local time, so we just use it as-is
+            # The timezone parameter is mainly for drone VIDEO metadata conversion (UTC -> local)
+            dt = dt_naive
+            logging.debug(f"📸 Using mtime for drone photo {p.name}: {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            # Apply adjustment if configured
+            return apply_adjustment_and_return(dt)
     
     # For non-drone files (iPhone/Apple), try exiftool if no filename date - UNIFIED VERSION
     else:
@@ -736,14 +1150,14 @@ def file_date(p: Path, tz_name: str = "America/Montreal"):
                 try:
                     # Parse the datetime and extract date
                     dt = datetime.fromisoformat(datetime_str + "+00:00").replace(tzinfo=None)
-                    logging.info(f"Using exiftool date for {p.name}: {dt.date()} from unified exiftool")
-                    return dt.date()
+                    logging.info(f"📅 Using metadata date for {p.name}: {dt.date()}")
+                    return apply_adjustment_and_return(dt)
                 except ValueError as e:
                     logging.warning(f"Failed to parse exiftool datetime {datetime_str}: {e}")
                     # Will fall through to filename/mtime extraction
             else:
                 # exiftool failed, will be placed in date_non_valide later
-                logging.warning(f"exiftool failed for {p.name}, will use date_non_valide folder")
+                logging.debug(f"exiftool returned no date for {p.name}")
                 # Don't return None here yet, let it try filename patterns first
     
     # Try to extract date from filename first (more reliable for camera files)
@@ -760,7 +1174,7 @@ def file_date(p: Path, tz_name: str = "America/Montreal"):
             dt = datetime(int(year), int(month), int(day))
             # Sanity check: reasonable date range
             if 1990 <= dt.year <= 2030:
-                return dt.date()
+                return apply_adjustment_and_return(dt)
         except ValueError:
             pass
     
@@ -771,7 +1185,7 @@ def file_date(p: Path, tz_name: str = "America/Montreal"):
             year, month, day = pattern2.groups()
             dt = datetime(int(year), int(month), int(day))
             if 1990 <= dt.year <= 2030:
-                return dt.date()
+                return apply_adjustment_and_return(dt)
         except ValueError:
             pass
     
@@ -784,7 +1198,7 @@ def file_date(p: Path, tz_name: str = "America/Montreal"):
         print(f"[WARN] File {filename} has invalid date {dt.date()}, will be placed in 'date_non_valide' folder")
         return None
     
-    return dt.date()
+    return apply_adjustment_and_return(dt)
 
 def source_name(p: Path, input_root: Path):
     # Take immediate parent segment under input_root as "source"
@@ -938,7 +1352,7 @@ def _get_exiftool_debug_info(path: Path) -> str:
 
 def copy_file(source: Path, dest: Path, footage_raw_path: Path, simulate=False):
     """
-    Create an empty text placeholder instead of copying large video files.
+    Create a JSON metadata placeholder instead of copying large video files.
     This allows organization simulation without using disk space.
     """
     if simulate:
@@ -947,8 +1361,8 @@ def copy_file(source: Path, dest: Path, footage_raw_path: Path, simulate=False):
         if dest.exists():
             dest.unlink()
         
-        # Create a .txt placeholder instead of copying the actual video file
-        txt_dest = dest.with_suffix('.txt')
+        # Create a .json placeholder instead of copying the actual video file
+        json_dest = dest.with_suffix('.json')
         
         # Get debug information about time extraction
         file_mtime = datetime.fromtimestamp(source.stat().st_mtime)
@@ -981,6 +1395,7 @@ def copy_file(source: Path, dest: Path, footage_raw_path: Path, simulate=False):
         quicktime_local = None
         quicktime_source = None
         time_decision_info = None
+        drone_data = None
         
         if _path_has_drone_segment(source):
             drone_data = extract_times_for_drone_file(source, "America/Montreal")
@@ -990,8 +1405,7 @@ def copy_file(source: Path, dest: Path, footage_raw_path: Path, simulate=False):
                 quicktime_utc = drone_data["utc_iso"]
                 time_decision_info = f"Time difference: {drone_data['time_diff_minutes']:.1f} minutes from mtime"
         
-        # Get video metadata for all video files (not just cell phones)
-        video_metadata = {}
+        # Get video metadata for all video files
         video_metadata = extract_video_metadata(source)
         
         # Get source type information
@@ -1000,63 +1414,66 @@ def copy_file(source: Path, dest: Path, footage_raw_path: Path, simulate=False):
         # Execute exiftool command (unified version for consistency)
         exiftool_datetime, exiftool_result = _get_exiftool_datetime_unified(source)
         
-        # Write basic info about the original file to the placeholder
-        with open(txt_dest, 'w', encoding='utf-8') as f:
-            f.write(f"PLACEHOLDER FOR: {source.name}\n")
-            f.write(f"Original path: {source}\n")
-            f.write(f"Original size: {source.stat().st_size:,} bytes\n")
-            f.write(f"Created: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            
-            f.write(f"\n=== SOURCE INFO ===\n")
-            f.write(f"*** SOURCE TAG: {source_info['source_tag']} ***\n")  # Tag très visible pour tri
-            f.write(f"Source Type: {source_info['source_type']}\n")
-            f.write(f"Device Category: {source_info['device_category']}\n")
-            f.write(f"Is drone file: {'Yes' if _path_has_drone_segment(source) else 'No'}\n")
-            f.write(f"Is cell file: {'Yes' if _path_has_cell_segment(source) else 'No'}\n")
-            
-            f.write(f"\n=== TIME DEBUG INFO ===\n")
-            f.write(f"File mtime: {file_mtime.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Filename time: {filename_time or 'Not found'}\n")
-            f.write(f"QuickTime UTC: {quicktime_utc or 'Not applicable/found'}\n")
-            f.write(f"QuickTime local: {quicktime_local or 'Not applicable/found'}\n")
-            f.write(f"QuickTime source: {quicktime_source or 'Not applicable'}\n")
-            if time_decision_info:
-                f.write(f"Time selection decision: {time_decision_info}\n")
-            
-            f.write(f"\n=== EXIFTOOL COMMAND RESULT ===\n")
-            f.write(f"Command: exiftool -QuickTime:DateTimeOriginal (with DateTimeOriginal and QuickTime:CreationDate fallbacks)\n")
-            f.write(f"Result: {exiftool_result}\n")
-            if exiftool_datetime:
-                f.write(f"📅 EXTRACTED DATETIME: {exiftool_datetime}\n")
-                f.write(f"🎯 THIS IS THE DATETIME USED FOR FILE NAMING\n")
-            
-            # Add comprehensive exiftool debug info for troubleshooting
-            f.write(f"\n=== EXIFTOOL DEBUG INFO ===\n")
-            exiftool_full_debug = _get_exiftool_debug_info(source)
-            f.write(f"{exiftool_full_debug}\n")
-            
-            # Add video metadata for all video files
-            if video_metadata:
-                f.write(f"\n=== VIDEO TECHNICAL INFO ===\n")
-                f.write(f"Resolution: {video_metadata.get('resolution', 'Unknown')}\n")
-                f.write(f"Frame Rate: {video_metadata.get('frame_rate', 'Unknown')}\n")
-                f.write(f"Codec: {video_metadata.get('codec', 'Unknown')}\n")
-                f.write(f"Pixel Format: {video_metadata.get('pixel_format', 'Unknown')}\n")
-                f.write(f"Color Space: {video_metadata.get('color_space', 'Unknown')}\n")
-                f.write(f"Color Transfer: {video_metadata.get('color_transfer', 'Unknown')}\n")
-                f.write(f"Color Primaries: {video_metadata.get('color_primaries', 'Unknown')}\n")
-                f.write(f"Is Log/HDR: {video_metadata.get('is_log', 'Unknown')}\n")
-                f.write(f"*** HDR TAG: {video_metadata.get('hdr_tag', 'Unknown')} ***\n")  # Tag très visible
-                f.write(f"Format: {video_metadata.get('format_name', 'Unknown')}\n")
-                f.write(f"Duration: {video_metadata.get('duration', 'Unknown')} seconds\n")
-                f.write(f"Bit Rate: {video_metadata.get('bit_rate', 'Unknown')} bits/s\n")
-            else:
-                f.write(f"\n=== VIDEO TECHNICAL INFO ===\n")
-                f.write(f"Metadata extraction failed or file is not a video\n")
-            
-            f.write(f"\nThis is a placeholder file to simulate organization without copying large video files.\n")
+        # Get raw metadata for debugging
+        raw_ffprobe = get_raw_ffprobe_metadata(source)
+        raw_exiftool = get_raw_exiftool_metadata(source)
+        
+        # Build structured JSON metadata
+        metadata = {
+            "placeholder_info": {
+                "created_at": datetime.now().isoformat(),
+                "original_filename": source.name,
+                "original_path": str(source),
+                "original_size_bytes": source.stat().st_size,
+                "placeholder_format_version": "1.0"
+            },
+            "file_info": {
+                "name": source.name,
+                "extension": source.suffix.lower(),
+                "size_bytes": source.stat().st_size,
+                "size_mb": round(source.stat().st_size / (1024 ** 2), 2),
+                "mtime": file_mtime.isoformat(),
+                "mtime_readable": file_mtime.strftime('%Y-%m-%d %H:%M:%S')
+            },
+            "source_detection": {
+                "source_type": source_info['source_type'],
+                "source_tag": source_info['source_tag'],
+                "device_category": source_info['device_category'],
+                "is_drone_path": _path_has_drone_segment(source),
+                "is_cell_path": _path_has_cell_segment(source)
+            },
+            "timestamps": {
+                "filename_time": filename_time,
+                "exiftool": {
+                    "datetime": exiftool_datetime,
+                    "status": exiftool_result
+                }
+            },
+            "video_metadata": video_metadata if video_metadata else None,
+            "raw_metadata": {
+                "ffprobe": raw_ffprobe,
+                "exiftool": raw_exiftool
+            }
+        }
+        
+        # Add drone-specific data if available
+        if drone_data:
+            metadata["timestamps"]["drone"] = {
+                "utc_iso": quicktime_utc,
+                "local_iso": quicktime_local,
+                "source_tag": quicktime_source,
+                "time_diff_minutes": drone_data['time_diff_minutes'],
+                "decision_info": time_decision_info
+            }
+        
+        # Write JSON with beautiful formatting
+        with open(json_dest, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=4, ensure_ascii=False)
         
         return True
+    except Exception as e:
+        print(f"[WARN] JSON placeholder creation failed: {e}")
+        return False
     except Exception as e:
         print(f"[WARN] Placeholder creation failed: {e}")
         return False
@@ -1085,6 +1502,8 @@ def progress_line(i, total, current):
     pct = int((i / total) * 100) if total else 100
     sys.stdout.write(f"\r[{pct:3d}%] {i}/{total}  {current}")
     sys.stdout.flush()
+    # Mark that a progress line was shown, so next log message will add newline
+    mark_progress_line_shown()
 
 def main():
     args = parse_args()
@@ -1123,11 +1542,11 @@ def main():
         args.output_dir = project_root / "Footage_metadata_sorted"
         print(f"Using standardized output directory: {args.output_dir}")
     
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(levelname)s: %(message)s'
-    )
+    # Configure logging with colors
+    setup_logging(level=logging.INFO)
+    
+    # Load time adjustments for specific groups
+    time_adjustments = load_group_time_adjustments()
     
     input_root = footage_raw_dir.resolve()
     output_root = args.output_dir.resolve()
@@ -1167,39 +1586,62 @@ def main():
     failed = 0
 
     for idx, (f, file_type) in enumerate(all_files, start=1):
-        d = file_date(f, args.tz)
-        src = source_name(f, input_root)
+        # Show progress at start of iteration
+        progress_line(idx, total, f.name)
         
-        # Extract time and clean filename (pass timezone for drone files)
-        time_str = extract_time_from_file(f, args.tz)
+        src = source_name(f, input_root)
+        d = file_date(f, args.tz, src, time_adjustments)
+        
+        # Extract time and clean filename (pass timezone, group name, and time adjustments)
+        time_str = extract_time_from_file(f, args.tz, src, time_adjustments)
         
         # Handle special cases
         if time_str == "KEEP_ORIGINAL":
-            # Keep original filename with source prefix, place in date_non_valide
-            day_dir = output_root / "date_non_valide"
-            original_name = f.name
-            out_name = f"{src}_{original_name}"
-            logging.info(f"Keeping original name for {f.name}: {out_name}")
+            # No metadata time found, check if we should use mtime or date_non_valide
+            # Create type-specific root folder (photo or video)
+            type_root = output_root / ("photo" if file_type == "photo" else "video")
+            
+            # Check if filename contains "dji" or "DJI" (case-insensitive)
+            has_dji_in_name = "dji" in f.name.lower()
+            
+            if has_dji_in_name and d is not None:
+                # DJI file with valid mtime - use it (likely drone footage with correct file time)
+                day_dir = type_root / d.strftime("%Y-%m-%d")
+                mtime = datetime.fromtimestamp(f.stat().st_mtime)
+                # Apply time adjustment if configured
+                if time_adjustments and src:
+                    mtime_adjusted = adjust_datetime_for_group(mtime, src, time_adjustments)
+                else:
+                    mtime_adjusted = mtime
+                time_str = f"{mtime_adjusted.hour:02d}h{mtime_adjusted.minute:02d}m{mtime_adjusted.second:02d}s"
+                clean_name = remove_temporal_elements(f.name, file_type)
+                out_name = f"{time_str}_{src}_{clean_name}"
+                logging.info(f"📷 Using mtime for DJI file {f.name} (no metadata found)")
+            else:
+                # Not DJI or no valid date - put in date_non_valide (mtime unreliable)
+                day_dir = type_root / "date_non_valide"
+                original_name = f.name
+                out_name = f"{src}_{original_name}"
+                logging.warning(f"⚠️  No metadata for {f.name} - placed in date_non_valide")
         elif time_str is None:
             # File doesn't have valid time info, put in date_non_valide
-            day_dir = output_root / "date_non_valide"
+            # Create type-specific root folder (photo or video)
+            type_root = output_root / ("photo" if file_type == "photo" else "video")
+            day_dir = type_root / "date_non_valide"
             time_str = "00h00m00s"  # Default time for invalid files
             d = None  # Override date to ensure it goes to date_non_valide
             clean_name = remove_temporal_elements(f.name, file_type)
             out_name = f"{time_str}_{src}_{clean_name}"
         else:
             # Normal processing
+            # Create type-specific root folder (photo or video)
+            type_root = output_root / ("photo" if file_type == "photo" else "video")
+            
             # Handle invalid dates
             if d is None:
-                base_day_dir = output_root / "date_non_valide"
+                day_dir = type_root / "date_non_valide"
             else:
-                base_day_dir = output_root / d.strftime("%Y-%m-%d")
-                
-            # For photos, create a "photos" subdirectory within the day folder
-            if file_type == "photo":
-                day_dir = base_day_dir / "photos"
-            else:
-                day_dir = base_day_dir
+                day_dir = type_root / d.strftime("%Y-%m-%d")
                 
             clean_name = remove_temporal_elements(f.name, file_type)
             # New naming format: <heure>_<sous-dossier>_<nom_original_sans_temps>
@@ -1233,7 +1675,7 @@ def main():
         created += 1 if ok else 0
         failed  += 0 if ok else 1
 
-        progress_line(idx, total, f.name)
+        # Progress line already shown at start of iteration
 
     # Final newline after progress
     print()
